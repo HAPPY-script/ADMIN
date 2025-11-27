@@ -27,10 +27,9 @@ local HttpService = game:GetService("HttpService")
 local USERNAME = LocalPlayer.Name
 local USERID = LocalPlayer.UserId
 
--- Lấy tên game thật bằng API Roblox
 local function GetRealGameName()
-    local universeId = game.GameId
-    local url = "https://games.roblox.com/v1/games?universeIds=" .. universeId
+    local placeId = game.PlaceId
+    local url = "https://games.roblox.com/v1/games/multiget-place-details?placeIds=" .. placeId
 
     local response = HttpRequest({
         Url = url,
@@ -43,8 +42,9 @@ local function GetRealGameName()
     end
 
     local data = HttpService:JSONDecode(response.Body)
-    if data and data.data and data.data[1] and data.data[1].name then
-        return data.data[1].name
+
+    if data and data[1] and data[1].name then
+        return data[1].name
     end
 
     return "Unknown Game"
@@ -111,9 +111,6 @@ local function ReportPlayer()
 	end
 end
 
---==================================================--
---  AUTO SEND
---==================================================--
 task.wait(1)
 
 ReportPlayer()
