@@ -27,9 +27,16 @@ local HttpService = game:GetService("HttpService")
 local USERNAME = LocalPlayer.Name
 local USERID = LocalPlayer.UserId
 
+-- Lấy tên game thật bằng API Roblox
+
+-- Chuyển tên game thành key an toàn cho Firebase
+local function MakeSafeKey(str)
+    return str:gsub("[.%$#%[%]/]", "_")
+end
+
 local function GetRealGameName()
-    local placeId = game.PlaceId
-    local url = "https://games.roblox.com/v1/games/multiget-place-details?placeIds=" .. placeId
+    local universeId = game.GameId
+    local url = "https://games.roblox.com/v1/games?universeIds=" .. universeId
 
     local response = HttpRequest({
         Url = url,
@@ -42,9 +49,8 @@ local function GetRealGameName()
     end
 
     local data = HttpService:JSONDecode(response.Body)
-
-    if data and data[1] and data[1].name then
-        return data[1].name
+    if data and data.data and data.data[1] and data.data[1].name then
+        return data.data[1].name
     end
 
     return "Unknown Game"
@@ -53,6 +59,7 @@ end
 -- Tên game thật + PlaceId
 local REAL_GAME_NAME = GetRealGameName()
 local CURRENT_GAME = REAL_GAME_NAME .. " (" .. game.PlaceId .. ")"
+local SAFE_GAME_KEY = MakeSafeKey(CURRENT_GAME)
 
 local PROJECT_URL = "https://happy-script-bada6-default-rtdb.asia-southeast1.firebasedatabase.app/Member/" .. USERNAME .. ".json"
 
@@ -89,10 +96,10 @@ local function ReportPlayer()
 	-- Nếu chưa có bảng Games thì tạo
 	data.Games = data.Games or {}
 
-	-- Thêm game mới nếu chưa có
-	if not data.Games[CURRENT_GAME] then
-		data.Games[CURRENT_GAME] = true
-	end
+    -- Thêm game mới nếu chưa có
+    if not data.Games[SAFE_GAME_KEY] then
+        data.Games[SAFE_GAME_KEY] = true
+    end
 
 	print("[DataMember] Lưu:", USERNAME, USERID, CURRENT_GAME)
 
@@ -111,6 +118,9 @@ local function ReportPlayer()
 	end
 end
 
+--==================================================--
+--  AUTO SEND
+--==================================================--
 task.wait(1)
 
 ReportPlayer()
