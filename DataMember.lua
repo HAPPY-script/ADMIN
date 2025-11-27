@@ -27,12 +27,34 @@ local HttpService = game:GetService("HttpService")
 local USERNAME = LocalPlayer.Name
 local USERID = LocalPlayer.UserId
 
--- Ví dụ: "Blox Fruits (2753915549)"
-local CURRENT_GAME = tostring(game.Name .. " (" .. game.PlaceId .. ")")
+-- Lấy tên game thật bằng API Roblox
+local function GetRealGameName()
+    local universeId = game.GameId
+    local url = "https://games.roblox.com/v1/games?universeIds=" .. universeId
 
-local PROJECT_URL =
-	"https://happy-script-bada6-default-rtdb.asia-southeast1.firebasedatabase.app/Member/" ..
-	USERNAME .. ".json"
+    local response = HttpRequest({
+        Url = url,
+        Method = "GET"
+    })
+
+    if not response or response.StatusCode ~= 200 then
+        warn("[GetRealGameName] Lỗi API → dùng fallback")
+        return "Unknown Game"
+    end
+
+    local data = HttpService:JSONDecode(response.Body)
+    if data and data.data and data.data[1] and data.data[1].name then
+        return data.data[1].name
+    end
+
+    return "Unknown Game"
+end
+
+-- Tên game thật + PlaceId
+local REAL_GAME_NAME = GetRealGameName()
+local CURRENT_GAME = REAL_GAME_NAME .. " (" .. game.PlaceId .. ")"
+
+local PROJECT_URL = "https://happy-script-bada6-default-rtdb.asia-southeast1.firebasedatabase.app/Member/" .. USERNAME .. ".json"
 
 --==================================================--
 --  GET USER DATA (NEEDED TO AVOID OVERWRITE)
