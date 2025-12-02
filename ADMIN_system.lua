@@ -1,3 +1,6 @@
+
+_G.AdminLoaded = true
+
 --============================--
 --  CLIENT-ONLY ADMIN SYSTEM
 --============================--
