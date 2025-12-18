@@ -1,3 +1,28 @@
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local ALLOWED_IDS = {
+	7326395533,
+	9460094811,
+	4333331142,
+}
+
+local function isAllowed(userId)
+	for _, id in ipairs(ALLOWED_IDS) do
+		if id == userId then
+			return true
+		end
+	end
+	return false
+end
+if not isAllowed(LocalPlayer.UserId) then
+	warn("[Guard] Client không được phép chạy script:", LocalPlayer.UserId)
+	return
+end
+
+--==========================
+-- SCRIPT
+--==========================
+
 local CheckUsingScreen = Instance.new("ScreenGui")
 CheckUsingScreen.Name = "CheckUsingScreen"
 CheckUsingScreen.ResetOnSpawn = false
