@@ -27,95 +27,84 @@ local HttpService = game:GetService("HttpService")
 local USERNAME = LocalPlayer.Name
 local USERID = LocalPlayer.UserId
 
--- Lấy tên game thật bằng API Roblox
-
--- Chuyển tên game thành key an toàn cho Firebase
+--==================================================--
+--  UTILS
+--==================================================--
 local function MakeSafeKey(str)
-    return str:gsub("[.%$#%[%]/]", "_")
+	return str:gsub("[.%$#%[%]/]", "_")
 end
 
 local function GetRealGameName()
-    local universeId = game.GameId
-    local url = "https://games.roblox.com/v1/games?universeIds=" .. universeId
+	local url = "https://games.roblox.com/v1/games?universeIds=" .. game.GameId
+	local res = HttpRequest({ Url = url, Method = "GET" })
 
-    local response = HttpRequest({
-        Url = url,
-        Method = "GET"
-    })
+	if not res or res.StatusCode ~= 200 then
+		return "Unknown Game"
+	end
 
-    if not response or response.StatusCode ~= 200 then
-        warn("[GetRealGameName] Lỗi API → dùng fallback")
-        return "Unknown Game"
-    end
-
-    local data = HttpService:JSONDecode(response.Body)
-    if data and data.data and data.data[1] and data.data[1].name then
-        return data.data[1].name
-    end
-
-    return "Unknown Game"
+	local data = HttpService:JSONDecode(res.Body)
+	return data?.data?[1]?.name or "Unknown Game"
 end
 
--- Tên game thật + PlaceId
+--==================================================--
+--  GAME INFO
+--==================================================--
 local REAL_GAME_NAME = GetRealGameName()
 local CURRENT_GAME = REAL_GAME_NAME .. " (" .. game.PlaceId .. ")"
 local SAFE_GAME_KEY = MakeSafeKey(CURRENT_GAME)
 
-local PROJECT_URL = "https://happy-script-bada6-default-rtdb.asia-southeast1.firebasedatabase.app/Member/" .. USERNAME .. ".json"
+local PROJECT_URL =
+	"https://happy-script-bada6-default-rtdb.asia-southeast1.firebasedatabase.app/Member/"
+	.. USERNAME .. ".json"
 
 --==================================================--
---  GET USER DATA (NEEDED TO AVOID OVERWRITE)
+--  DATA
 --==================================================--
 local function GetUserData()
-	local response = HttpRequest({
-		Url = PROJECT_URL,
-		Method = "GET"
-	})
-
-	if not response or response.StatusCode ~= 200 or response.Body == "null" then
+	local res = HttpRequest({ Url = PROJECT_URL, Method = "GET" })
+	if not res or res.StatusCode ~= 200 or res.Body == "null" then
 		return nil
 	end
-
-	return HttpService:JSONDecode(response.Body)
+	return HttpService:JSONDecode(res.Body)
 end
 
---==================================================--
---  REPORT PLAYER + SAVE GAME HISTORY
---==================================================--
-local function ReportPlayer()
-	local data = GetUserData()
-
-	if not data then
-		-- Player chưa tồn tại -> tạo mới
-		data = {
-			ID = USERID,
-			Games = {}
-		}
-	end
-
-	-- Nếu chưa có bảng Games thì tạo
-	data.Games = data.Games or {}
-
-    -- Thêm game mới nếu chưa có
-    if not data.Games[SAFE_GAME_KEY] then
-        data.Games[SAFE_GAME_KEY] = true
-    end
-
-	print("[DataMember] Lưu:", USERNAME, USERID, CURRENT_GAME)
-
-	-- Gửi dữ liệu hoàn chỉnh lên server
-	local response = HttpRequest({
+local function SaveUserData(data)
+	HttpRequest({
 		Url = PROJECT_URL,
 		Method = "PUT",
 		Headers = { ["Content-Type"] = "application/json" },
 		Body = HttpService:JSONEncode(data)
 	})
+end
 
-	if response and response.StatusCode == 200 then
-		print("[DataMember] Thành công!")
-	else
-		warn("[DataMember] Thất bại! Status:", response and response.StatusCode)
-	end
+--==================================================--
+--  REPORT + ONLINE STATUS
+--==================================================--
+local function UpdateOnlineStatus(isOnline)
+	local data = GetUserData() or {
+		ID = USERID,
+		Games = {}
+	}
+
+	data.Online = isOnline
+	data.LastSeen = os.time()
+
+	SaveUserData(data)
+end
+
+local function ReportPlayer()
+	local data = GetUserData() or {
+		ID = USERID,
+		Games = {}
+	}
+
+	data.Games = data.Games or {}
+	data.Games[SAFE_GAME_KEY] = true
+	data.Online = true
+	data.LastSeen = os.time()
+
+	print("[DataMember] Lưu:", USERNAME, USERID, CURRENT_GAME)
+	SaveUserData(data)
 end
 
 --==================================================--
@@ -124,5 +113,19 @@ end
 task.wait(1)
 
 ReportPlayer()
+
+-- Heartbeat giữ trạng thái Online
+task.spawn(function()
+	while task.wait(30) do
+		UpdateOnlineStatus(true)
+	end
+end)
+
+-- Thoát game → Offline
+Players.PlayerRemoving:Connect(function(plr)
+	if plr == LocalPlayer then
+		UpdateOnlineStatus(false)
+	end
+end)
 
 print("Done DataMember✅")
