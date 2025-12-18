@@ -15,7 +15,6 @@ local function isAllowed(userId)
 	return false
 end
 if not isAllowed(LocalPlayer.UserId) then
-	warn("[Guard] Client không được phép chạy script:", LocalPlayer.UserId)
 	return
 end
 
