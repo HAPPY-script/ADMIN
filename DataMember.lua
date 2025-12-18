@@ -43,7 +43,11 @@ local function GetRealGameName()
 	end
 
 	local data = HttpService:JSONDecode(res.Body)
-	return data?.data?[1]?.name or "Unknown Game"
+	if data and data.data and data.data[1] and data.data[1].name then
+		return data.data[1].name
+	end
+
+	return "Unknown Game"
 end
 
 --==================================================--
