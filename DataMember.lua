@@ -55,7 +55,9 @@ local function SupabaseHeaders()
 		["apikey"] = SUPABASE_KEY,
 		["Authorization"] = "Bearer " .. SUPABASE_KEY,
 		["Content-Type"] = "application/json",
-		["Accept"] = "application/json"
+		["Accept"] = "application/json",
+		["Accept-Profile"] = "public",
+		["Content-Profile"] = "public",
 	}
 end
 
