@@ -94,7 +94,7 @@ local function SaveUserData(data)
 
 	if existing then
 		-- PATCH existing row where user_id = eq.USERID
-		local url = BASE_API .. "?user_id=eq." .. USERID
+		local url = BASE_API .. "?user_id=eq." .. USERID .. "&select=*"
 		local body = HttpService:JSONEncode(data)
 		local headers = SupabaseHeaders()
 		headers["Prefer"] = "return=representation"
