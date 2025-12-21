@@ -202,6 +202,9 @@ UICorner.Parent = Button
 -- SYSTEM
 --=============================================================================================================--
 
+-- CheckMembersInServer_fixed.lua (LocalScript)
+-- Client-only; expects each client to write ServerId = game.JobId to Firebase when online
+
 --==========================
 -- Services & Helpers
 --==========================
@@ -215,10 +218,10 @@ local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 local screen = playerGui:WaitForChild("CheckUsingScreen")
 
--- Firebase base (same base as your other scripts)
+-- Firebase base
 local MEMBER_BASE = "https://happy-script-bada6-default-rtdb.asia-southeast1.firebasedatabase.app/Member/"
 
--- Auto-detect http request function (compatible with many executors)
+-- Auto-detect http request
 local function HttpRequest(data)
 	if syn and syn.request then
 		return syn.request(data)
@@ -242,7 +245,6 @@ local function safeDecode(body)
 	return nil
 end
 
--- Make safe key for game (same logic as your Member script)
 local function MakeSafeKey(str)
 	return str:gsub("[.%$#%[%]/]", "_")
 end
@@ -266,30 +268,27 @@ local CURRENT_GAME = REAL_GAME_NAME .. " (" .. game.PlaceId .. ")"
 local SAFE_GAME_KEY = MakeSafeKey(CURRENT_GAME)
 
 --==========================
--- GUI selectors (structure you described)
+-- GUI selectors
 --==========================
 local main = screen:WaitForChild("Main")
 local scrolling = main:WaitForChild("ScrollingFrame")
 local template = scrolling:WaitForChild("Player0")
 local button = screen:WaitForChild("Button")
 
-local overlayFrame = screen:WaitForChild("Frame") -- Frame that has UIGradient
+local overlayFrame = screen:WaitForChild("Frame")
 local overlayGradient = overlayFrame:FindFirstChildOfClass("UIGradient")
 
--- ensure initial states per your spec
+-- initial states
 main.Visible = false
 overlayFrame.Visible = false
-if overlayGradient then
-	overlayGradient.Offset = Vector2.new(0, 1)
-end
-overlayFrame.BackgroundTransparency = 1 -- hidden initially
+if overlayGradient then overlayGradient.Offset = Vector2.new(0, 1) end
+overlayFrame.BackgroundTransparency = 1
 
 --==========================
--- Helper: get member data from Firebase by username
+-- HTTP helpers
 --==========================
 local function GetMemberDataByName(username)
-	-- Simple URL encoding for spaces (if needed). Adjust if your DB keys use different escaping.
-	local safeName = username:gsub(" ", "%%20")
+	local safeName = tostring(username):gsub(" ", "%%20")
 	local url = MEMBER_BASE .. safeName .. ".json"
 	local ok, res = pcall(function()
 		return HttpRequest({ Url = url, Method = "GET" })
@@ -299,19 +298,15 @@ local function GetMemberDataByName(username)
 	end
 	local body = res.Body or res.body or res.Response or res
 	if not body or body == "null" then return nil end
-	local data = safeDecode(body)
-	return data
+	return safeDecode(body)
 end
 
--- Helper: get headshot thumbnail URL
 local function GetAvatarUrl(userId, sizeEnum)
 	sizeEnum = sizeEnum or Enum.ThumbnailSize.Size48x48
 	local ok, thumbUrl = pcall(function()
 		return Players:GetUserThumbnailAsync(userId, Enum.ThumbnailType.HeadShot, sizeEnum)
 	end)
-	if ok and thumbUrl then
-		return thumbUrl
-	end
+	if ok and thumbUrl then return thumbUrl end
 	return nil
 end
 
@@ -324,10 +319,7 @@ local STEP_Y = 0.055
 local function clearOldRows()
 	for _, child in ipairs(scrolling:GetChildren()) do
 		if child:IsA("Frame") and child.Name:match("^Player%d+") then
-			-- keep template (Player0) untouched
-			if child ~= template then
-				child:Destroy()
-			end
+			if child ~= template then child:Destroy() end
 		end
 	end
 end
@@ -336,87 +328,90 @@ local function createRow(index, playerObj, avatarUrl)
 	local row = template:Clone()
 	row.Name = "Player" .. tostring(index)
 	row.Visible = true
-	-- position: X = 0,0 ; Y = START_Y + (index-1)*STEP_Y
 	local y = START_Y + (index - 1) * STEP_Y
 	row.Position = UDim2.new(0, 0, y, 0)
 
-	-- find Logo and Name inside row
 	local logo = row:FindFirstChild("Logo", true) or row:FindFirstChildOfClass("ImageLabel")
 	local nameLabel = row:FindFirstChild("Name", true) or row:FindFirstChildOfClass("TextLabel")
 
-	if nameLabel and playerObj then
-		nameLabel.Text = playerObj.Name
-	end
-
-	if logo and avatarUrl then
-		-- set image safely
-		pcall(function() logo.Image = avatarUrl end)
-	end
+	if nameLabel and playerObj then nameLabel.Text = playerObj.Name end
+	if logo and avatarUrl then pcall(function() logo.Image = avatarUrl end) end
 
 	row.Parent = scrolling
 	return row
 end
 
 --==========================
--- Main check flow: get players, check firebase, build UI
+-- Online check (fixed): require ServerId == game.JobId
 --==========================
 local CHECK_LASTSEEN_THRESHOLD = 60 -- seconds
 
 local function isMemberOnlineInThisServer(memberData)
 	if not memberData then return false end
 	if not memberData.Online then return false end
-	-- last seen freshness
+
 	local last = tonumber(memberData.LastSeen) or 0
 	if os.time() - last > CHECK_LASTSEEN_THRESHOLD then
 		return false
 	end
-	-- check Games contains SAFE_GAME_KEY
-	if memberData.Games and memberData.Games[SAFE_GAME_KEY] then
-		return true
+
+	-- IMPORTANT: require same server instance
+	-- memberData.ServerId must be written by each client when reporting (ServerId = game.JobId)
+	if tostring(memberData.ServerId) ~= tostring(game.JobId) then
+		return false
 	end
-	return false
+
+	-- optional: keep game check if you want, but ServerId is authoritative
+	-- if memberData.Games and not memberData.Games[SAFE_GAME_KEY] then return false end
+
+	return true
 end
 
+--==========================
+-- RefreshMemberList (robust)
+--==========================
 local function RefreshMemberList()
-	-- clear old rows first (except template)
 	clearOldRows()
 
 	local players = Players:GetPlayers()
-	local confirmed = {} -- list of {player = plr, avatar = url}
+	local confirmed = {}
+	local pending = #players
+	local timeout = 1.0 -- seconds max to wait for all HTTPs
+	local startTime = tick()
 
-	-- Parallelize requests per player to avoid blocking
-	local coros = {}
+	if pending == 0 then return end
+
+	-- spawn requests in parallel and mark complete by decrementing pending
 	for _, plr in ipairs(players) do
-		table.insert(coros, coroutine.create(function()
-			local data = GetMemberDataByName(plr.Name)
-			if isMemberOnlineInThisServer(data) then
+		task.spawn(function()
+			local ok, data = pcall(GetMemberDataByName, plr.Name)
+			if ok and data and isMemberOnlineInThisServer(data) then
 				local avatar = GetAvatarUrl(plr.UserId, Enum.ThumbnailSize.Size48x48)
 				table.insert(confirmed, { player = plr, avatar = avatar })
 			end
-		end))
+			pending = pending - 1
+		end)
 	end
 
-	-- run coroutines and wait a tiny bit between starts to avoid spamming
-	for _, co in ipairs(coros) do
-		coroutine.resume(co)
-		task.wait(0.02)
+	-- wait until all done or timeout
+	while pending > 0 and (tick() - startTime) < timeout do
+		task.wait(0.03)
 	end
 
-	-- small wait to allow GETs to complete (simple approach)
-	-- if your executor is fast you can make this smaller
-	task.wait(0.25)
+	-- if some still pending, they'll be ignored (fail-safe)
 
-	-- create rows
-	table.sort(confirmed, function(a,b) return a.player.Name < b.player.Name end) -- optional order
+	-- stable ordering (optional)
+	table.sort(confirmed, function(a, b) return a.player.Name < b.player.Name end)
+
 	for idx, info in ipairs(confirmed) do
 		createRow(idx, info.player, info.avatar)
 	end
 end
 
--- Initial refresh
+-- initial
 RefreshMemberList()
 
--- Optional: refresh periodically or when players join/leave
+-- refresh on player join/leave
 Players.PlayerAdded:Connect(function()
 	task.wait(1)
 	RefreshMemberList()
@@ -427,16 +422,13 @@ Players.PlayerRemoving:Connect(function()
 end)
 
 --==========================
--- Overlay open/close animations (Frame with UIGradient)
---  - Opening and closing are exact inverses
---  - Total sequence is 2 * PHASE_DURATION, both phases use same duration
---  - overlayFrame.Position is set to main.Position BEFORE any animation starts
+-- Overlay open/close (kept as before)
 --==========================
-local PHASE_DURATION = 0.20 -- single-phase duration (seconds). total open/close = 0.4s
+local PHASE_DURATION = 0.20
 local PHASE_TWEEN = TweenInfo.new(PHASE_DURATION, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
-local animating = false -- prevent re-entry while any animation running
-local menuOpen = false -- actual state; only updated when sequence completes
+local animating = false
+local menuOpen = false
 
 local function tweenGradientTo(offset, callback)
 	if not overlayGradient then
@@ -445,42 +437,34 @@ local function tweenGradientTo(offset, callback)
 	end
 	local tw = TweenService:Create(overlayGradient, PHASE_TWEEN, { Offset = offset })
 	tw:Play()
-	if callback then
-		tw.Completed:Once(callback)
-	end
+	if callback then tw.Completed:Once(callback) end
 end
 
 local function tweenOverlayFade(fromTransparency, toTransparency, callback)
 	overlayFrame.BackgroundTransparency = fromTransparency
 	local tw = TweenService:Create(overlayFrame, PHASE_TWEEN, { BackgroundTransparency = toTransparency })
 	tw:Play()
-	if callback then
-		tw.Completed:Once(callback)
-	end
+	if callback then tw.Completed:Once(callback) end
 end
 
--- OPEN sequence
 local function openMainSequence()
-	-- reject if animation in progress or already open
 	if animating or menuOpen then return end
 	animating = true
 
-	-- align overlay to main BEFORE animation starts
+	-- align overlay to main
 	overlayFrame.Position = main.Position
+	overlayFrame.Size = main.Size
 
-	-- start refreshing content in background so rows load while animating
+	-- spawn refresh early
 	task.spawn(RefreshMemberList)
 
-	-- Phase 1: show overlay fully visible and sweep gradient (1 -> -1)
 	overlayFrame.Visible = true
 	overlayFrame.BackgroundTransparency = 0
 	if overlayGradient then overlayGradient.Offset = Vector2.new(0, 1) end
 
 	tweenGradientTo(Vector2.new(0, -1), function()
-		-- Phase 2: reveal main then fade overlay out (0 -> 1)
 		main.Visible = true
 		tweenOverlayFade(0, 1, function()
-			-- done
 			overlayFrame.Visible = false
 			if overlayGradient then overlayGradient.Offset = Vector2.new(0, 1) end
 			animating = false
@@ -489,20 +473,16 @@ local function openMainSequence()
 	end)
 end
 
--- CLOSE sequence (exact inverse)
 local function closeMainSequence()
-	-- reject if animation in progress or already closed
 	if animating or (not menuOpen) then return end
 	animating = true
 
-	-- align overlay to main BEFORE animation starts
 	overlayFrame.Position = main.Position
+	overlayFrame.Size = main.Size
 
-	-- Phase 1: make overlay visible and fade it in (1 -> 0)
 	overlayFrame.Visible = true
 	overlayFrame.BackgroundTransparency = 1
 	tweenOverlayFade(1, 0, function()
-		-- Phase 2: hide main and sweep gradient back (-1 -> 1)
 		main.Visible = false
 		if overlayGradient then overlayGradient.Offset = Vector2.new(0, -1) end
 		tweenGradientTo(Vector2.new(0, 1), function()
@@ -514,20 +494,13 @@ local function closeMainSequence()
 	end)
 end
 
--- toggle state (safe: will ignore spurious clicks during animating)
 local function toggleMain()
-	-- if animating, ignore click
 	if animating then return end
-	if not menuOpen then
-		openMainSequence()
-	else
-		closeMainSequence()
-	end
+	if not menuOpen then openMainSequence() else closeMainSequence() end
 end
 
 --==========================
--- Drag + Click for Button (based on your template)
---  - Debounced by animating state in toggleMain
+-- Drag + Click for floating button
 --==========================
 do
 	local btn = button
@@ -555,9 +528,7 @@ do
 			dragStart = input.Position
 			startPos = btn.Position
 			input.Changed:Connect(function()
-				if input.UserInputState == Enum.UserInputState.End then
-					dragging = false
-				end
+				if input.UserInputState == Enum.UserInputState.End then dragging = false end
 			end)
 		end
 	end)
@@ -571,10 +542,7 @@ do
 
 	btn.InputEnded:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-			if not moved then
-				-- click: toggle main (toggleMain already protects against spam via animating)
-				toggleMain()
-			end
+			if not moved then toggleMain() end
 		end
 	end)
 end
