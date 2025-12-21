@@ -1,4 +1,12 @@
 --==================================================--
+--  FIREBASE MAINTENANCE SWITCH
+--==================================================--
+if _G.RestFireBase == true then
+	warn("[DataMember] Database đang bảo trì, hệ thống tạm dừng")
+	return
+end
+
+--==================================================--
 --  HTTP REQUEST AUTO-DETECT
 --==================================================--
 local function HttpRequest(data)
