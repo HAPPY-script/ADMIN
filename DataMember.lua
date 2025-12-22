@@ -98,30 +98,32 @@ end
 -- Yêu cầu: `members` có unique/primary key trên `user_id`
 local function SaveUserData(data)
 	local payload = {
-		user_id = data.ID or USERID,
-		username = data.Username or USERNAME,
-		games = data.Games or {},
-		online = data.Online == true,
+		user_id   = data.ID or USERID,
+		username  = data.Username or USERNAME,
+		games     = data.Games or {},
+		online    = data.Online == true,
 		last_seen = data.LastSeen or os.time()
 	}
-	local body = HttpService:JSONEncode(payload)
+
 	local headers = defaultHeaders()
-	headers["Prefer"] = "resolution=merge-duplicates" -- upsert
-	-- Gửi POST để upsert (merge duplicates). Nếu DB có constraint trên user_id thì sẽ update.
+	headers["Prefer"] = "resolution=merge-duplicates"
+
 	local ok, res = pcall(HttpRequest, {
-		Url = REST_MEMBERS,
+		Url = REST_MEMBERS .. "?on_conflict=user_id",
 		Method = "POST",
 		Headers = headers,
-		Body = body
+		Body = HttpService:JSONEncode(payload)
 	})
-	-- Không cần ép timeout; chỉ log khi gặp lỗi
+
 	if not ok or not res then
 		warn("[DataMember] SaveUserData failed: no response")
 		return false
 	end
+
 	if res.StatusCode >= 200 and res.StatusCode < 300 then
 		return true
 	end
+
 	warn("[DataMember] SaveUserData status:", res.StatusCode, res.Body)
 	return false
 end
@@ -184,4 +186,4 @@ Players.PlayerRemoving:Connect(function(plr)
 	end
 end)
 
-print("Done DataMember (Supabase) ✅")
+print("✅Done DataMember")
