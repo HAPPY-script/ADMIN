@@ -94,140 +94,175 @@ local function GetUserData()
 	return body[1] -- PostgREST trả về mảng
 end
 
--- Replace your SaveUserData with this version
+local function safeJsonEncode(t)
+    local ok, s = pcall(function() return HttpService:JSONEncode(t) end)
+    if ok and type(s) == "string" then return s end
+    return "{}"
+end
+
+-- SaveUserData: INSERT if no row exists, otherwise PATCH the merged games (and update meta)
 local function SaveUserData(data)
-    -- prepare fields
     local uid = data.ID or USERID
     local uname = data.Username or USERNAME
     local gamesTable = data.Games or {}
     local onlineVal = (data.Online == true)
     local lastSeenVal = data.LastSeen or os.time()
 
-    -- encode games explicitly
-    local okg, gamesJson = pcall(function() return HttpService:JSONEncode(gamesTable) end)
-    if not okg then
-        gamesJson = "{}"
-    end
+    -- Check if record exists
+    local existing = GetUserData() -- returns full row or nil
+    if existing then
+        -- Merge existing.games and gamesTable without removing old keys
+        local merged = {}
+        -- existing.games may be nil or JSON decoded table
+        if existing.games and type(existing.games) == "table" then
+            for k,v in pairs(existing.games) do merged[k] = v end
+        end
+        if gamesTable and type(gamesTable) == "table" then
+            for k,v in pairs(gamesTable) do
+                -- only add if not exists (avoid replacing existing game entry)
+                if merged[k] == nil then
+                    merged[k] = v
+                end
+            end
+        end
 
-    -- build a payload object WITHOUT games and json-encode it
-    local basicObj = {
-        user_id = uid,
-        username = uname,
-        online = onlineVal,
-        last_seen = lastSeenVal
-    }
-    local basicJson = HttpService:JSONEncode(basicObj)
+        -- Build body to PATCH only the fields we want to update
+        local bodyObj = {
+            username = uname,
+            last_seen = lastSeenVal,
+            online = onlineVal,
+            games = merged
+        }
+        local body = safeJsonEncode(bodyObj)
 
-    -- insert games JSON into the encoded string so games becomes a real JSON object
-    -- basicJson is like: {"user_id":123,"username":"abc","online":true,"last_seen":1234567}
-    -- we need: {"user_id":123,"username":"abc","online":true,"last_seen":1234567,"games":{...}}
-    local body = basicJson:sub(1, #basicJson - 1) .. ',"games":' .. gamesJson .. '}'
+        local ok, res = pcall(HttpRequest, {
+            Url = REST_MEMBERS .. "?user_id=eq." .. tostring(uid),
+            Method = "PATCH",
+            Headers = defaultHeaders(),
+            Body = body
+        })
 
-    -- debug: (uncomment if you want to see actual payload in output)
-    -- print("[DataMember] SaveUserData body:", body)
+        if not ok or not res then
+            warn("[DataMember] SaveUserData PATCH failed: no response")
+            return false
+        end
+        if res.StatusCode >= 200 and res.StatusCode < 300 then
+            return true
+        end
+        warn("[DataMember] SaveUserData PATCH status:", res.StatusCode, res.Body)
+        return false
+    else
+        -- No existing row: create new record via POST (use on_conflict just in case)
+        local payload = {
+            user_id = uid,
+            username = uname,
+            games = gamesTable,
+            online = onlineVal,
+            last_seen = lastSeenVal
+        }
+        local body = safeJsonEncode(payload)
 
-    local headers = defaultHeaders()
-    headers["Prefer"] = "resolution=merge-duplicates"
+        local headers = defaultHeaders()
+        headers["Prefer"] = "resolution=merge-duplicates"
 
-    local ok, res = pcall(HttpRequest, {
-        Url = REST_MEMBERS .. "?on_conflict=user_id",
-        Method = "POST",
-        Headers = headers,
-        Body = body
-    })
+        local ok, res = pcall(HttpRequest, {
+            Url = REST_MEMBERS .. "?on_conflict=user_id",
+            Method = "POST",
+            Headers = headers,
+            Body = body
+        })
 
-    if not ok or not res then
-        warn("[DataMember] SaveUserData failed: no response")
+        if not ok or not res then
+            warn("[DataMember] SaveUserData POST failed: no response")
+            return false
+        end
+        if res.StatusCode >= 200 and res.StatusCode < 300 then
+            return true
+        end
+        warn("[DataMember] SaveUserData POST status:", res.StatusCode, res.Body)
         return false
     end
-
-    if res.StatusCode >= 200 and res.StatusCode < 300 then
-        return true
-    end
-
-    warn("[DataMember] SaveUserData status:", res.StatusCode, res.Body)
-    return false
 end
 
 --==================================================
 --  REPORT + ONLINE STATUS
 --==================================================
 local function UpdateOnlineStatus(isOnline)
-	local body = HttpService:JSONEncode({
-		online = isOnline == true,
-		last_seen = os.time()
-	})
+    local uid = USERID
+    local body = safeJsonEncode({
+        online = isOnline == true,
+        last_seen = os.time()
+    })
 
-	HttpRequest({
-		Url = REST_MEMBERS .. "?user_id=eq." .. USERID,
-		Method = "PATCH",
-		Headers = defaultHeaders(),
-		Body = body
-	})
+    local ok, res = pcall(HttpRequest, {
+        Url = REST_MEMBERS .. "?user_id=eq." .. tostring(uid),
+        Method = "PATCH",
+        Headers = defaultHeaders(),
+        Body = body
+    })
+    if not ok or not res then
+        warn("[DataMember] UpdateOnlineStatus failed: no response")
+        return false
+    end
+    if res.StatusCode >= 200 and res.StatusCode < 300 then
+        return true
+    end
+    -- if 404/204 etc handle as needed
+    return false
 end
 
 local function ReportPlayer()
-	local data = GetUserData() or {
-		ID = USERID,
-		Username = USERNAME,
-		Games = {}
-	}
-
-	data.Games = data.Games or {}
-	-- mark current game
-	data.Games[SAFE_GAME_KEY] = true
-	data.Online = true
-	data.LastSeen = os.time()
-	data.ID = USERID
-	data.Username = USERNAME
-
-	print("[DataMember] Lưu:", USERNAME, USERID, CURRENT_GAME)
-	SaveUserData(data)
+    SaveGameIfNotExists()
+    UpdateOnlineStatus(true)
+    print("[DataMember] Lưu/Report:", USERNAME, USERID, CURRENT_GAME)
 end
 
 local function SaveGameIfNotExists()
-	local data = GetUserData()
+    local uid = USERID
+    local data = GetUserData()
 
-	-- Nếu chưa có user → tạo mới
-	if not data then
-		data = {
-			ID = USERID,
-			Username = USERNAME,
-			Games = {
-				[SAFE_GAME_KEY] = {
-					name = REAL_GAME_NAME,
-					placeId = game.PlaceId,
-					firstSeen = os.time()
-				}
-			},
-			Online = true,
-			LastSeen = os.time()
-		}
-		SaveUserData(data)
-		return
-	end
+    local newGameEntry = {
+        name = REAL_GAME_NAME,
+        placeId = game.PlaceId,
+        firstSeen = os.time()
+    }
 
-	data.Games = data.Games or {}
+    -- if no record, create one with this single game
+    if not data then
+        local payload = {
+            ID = uid,
+            Username = USERNAME,
+            Games = { [SAFE_GAME_KEY] = newGameEntry },
+            Online = true,
+            LastSeen = os.time()
+        }
+        -- SaveUserData will POST
+        SaveUserData(payload)
+        print("[DataMember] Created new member with initial game:", CURRENT_GAME)
+        return
+    end
 
-	-- Nếu game đã tồn tại → KHÔNG GHI
-	if data.Games[SAFE_GAME_KEY] then
-		return
-	end
+    data.Games = data.Games or {}
 
-	-- Thêm game mới
-	data.Games[SAFE_GAME_KEY] = {
-		name = REAL_GAME_NAME,
-		placeId = game.PlaceId,
-		firstSeen = os.time()
-	}
+    -- If already exists, do nothing
+    if data.Games[SAFE_GAME_KEY] then
+        -- already recorded, but ensure last_seen/online updated separately
+        return
+    end
 
-	data.Online = true
-	data.LastSeen = os.time()
-	data.ID = USERID
-	data.Username = USERNAME
+    -- Add game locally, then PATCH only the games + meta
+    data.Games[SAFE_GAME_KEY] = newGameEntry
+    data.Online = true
+    data.LastSeen = os.time()
+    data.ID = uid
+    data.Username = USERNAME
 
-	print("[DataMember] Thêm game mới:", CURRENT_GAME)
-	SaveUserData(data)
+    local ok = SaveUserData({ ID = uid, Username = data.Username, Games = data.Games, Online = data.Online, LastSeen = data.LastSeen })
+    if ok then
+        print("[DataMember] Thêm game mới:", CURRENT_GAME)
+    else
+        warn("[DataMember] Không thể thêm game:", CURRENT_GAME)
+    end
 end
 
 --==================================================
