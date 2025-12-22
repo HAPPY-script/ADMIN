@@ -153,19 +153,17 @@ end
 --  REPORT + ONLINE STATUS
 --==================================================
 local function UpdateOnlineStatus(isOnline)
-	local data = GetUserData() or {
-		ID = USERID,
-		Username = USERNAME,
-		Games = {}
-	}
+	local body = HttpService:JSONEncode({
+		online = isOnline == true,
+		last_seen = os.time()
+	})
 
-	-- Ensure types/fields match what SaveUserData expects
-	data.Online = isOnline == true
-	data.LastSeen = os.time()
-	data.ID = USERID
-	data.Username = USERNAME
-
-	SaveUserData(data)
+	HttpRequest({
+		Url = REST_MEMBERS .. "?user_id=eq." .. USERID,
+		Method = "PATCH",
+		Headers = defaultHeaders(),
+		Body = body
+	})
 end
 
 local function ReportPlayer()
@@ -187,20 +185,64 @@ local function ReportPlayer()
 	SaveUserData(data)
 end
 
+local function SaveGameIfNotExists()
+	local data = GetUserData()
+
+	-- Nếu chưa có user → tạo mới
+	if not data then
+		data = {
+			ID = USERID,
+			Username = USERNAME,
+			Games = {
+				[SAFE_GAME_KEY] = {
+					name = REAL_GAME_NAME,
+					placeId = game.PlaceId,
+					firstSeen = os.time()
+				}
+			},
+			Online = true,
+			LastSeen = os.time()
+		}
+		SaveUserData(data)
+		return
+	end
+
+	data.Games = data.Games or {}
+
+	-- Nếu game đã tồn tại → KHÔNG GHI
+	if data.Games[SAFE_GAME_KEY] then
+		return
+	end
+
+	-- Thêm game mới
+	data.Games[SAFE_GAME_KEY] = {
+		name = REAL_GAME_NAME,
+		placeId = game.PlaceId,
+		firstSeen = os.time()
+	}
+
+	data.Online = true
+	data.LastSeen = os.time()
+	data.ID = USERID
+	data.Username = USERNAME
+
+	print("[DataMember] Thêm game mới:", CURRENT_GAME)
+	SaveUserData(data)
+end
+
 --==================================================
 --  AUTO SEND + HEARTBEAT
 --==================================================
 task.wait(1)
-ReportPlayer()
+SaveGameIfNotExists()
+UpdateOnlineStatus(true)
 
--- Heartbeat: giữ online (thay 30s -> 60s để giảm writes)
 task.spawn(function()
 	while task.wait(60) do
 		UpdateOnlineStatus(true)
 	end
 end)
 
--- Thoát game → Offline
 Players.PlayerRemoving:Connect(function(plr)
 	if plr == LocalPlayer then
 		UpdateOnlineStatus(false)
