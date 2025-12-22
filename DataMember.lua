@@ -94,38 +94,59 @@ local function GetUserData()
 	return body[1] -- PostgREST trả về mảng
 end
 
--- Upsert member (POST với Prefer: resolution=merge-duplicates)
--- Yêu cầu: `members` có unique/primary key trên `user_id`
+-- Replace your SaveUserData with this version
 local function SaveUserData(data)
-	local payload = {
-		user_id   = data.ID or USERID,
-		username  = data.Username or USERNAME,
-		games     = data.Games or {},
-		online    = data.Online == true,
-		last_seen = data.LastSeen or os.time()
-	}
+    -- prepare fields
+    local uid = data.ID or USERID
+    local uname = data.Username or USERNAME
+    local gamesTable = data.Games or {}
+    local onlineVal = (data.Online == true)
+    local lastSeenVal = data.LastSeen or os.time()
 
-	local headers = defaultHeaders()
-	headers["Prefer"] = "resolution=merge-duplicates"
+    -- encode games explicitly
+    local okg, gamesJson = pcall(function() return HttpService:JSONEncode(gamesTable) end)
+    if not okg then
+        gamesJson = "{}"
+    end
 
-	local ok, res = pcall(HttpRequest, {
-		Url = REST_MEMBERS .. "?on_conflict=user_id",
-		Method = "POST",
-		Headers = headers,
-		Body = HttpService:JSONEncode(payload)
-	})
+    -- build a payload object WITHOUT games and json-encode it
+    local basicObj = {
+        user_id = uid,
+        username = uname,
+        online = onlineVal,
+        last_seen = lastSeenVal
+    }
+    local basicJson = HttpService:JSONEncode(basicObj)
 
-	if not ok or not res then
-		warn("[DataMember] SaveUserData failed: no response")
-		return false
-	end
+    -- insert games JSON into the encoded string so games becomes a real JSON object
+    -- basicJson is like: {"user_id":123,"username":"abc","online":true,"last_seen":1234567}
+    -- we need: {"user_id":123,"username":"abc","online":true,"last_seen":1234567,"games":{...}}
+    local body = basicJson:sub(1, #basicJson - 1) .. ',"games":' .. gamesJson .. '}'
 
-	if res.StatusCode >= 200 and res.StatusCode < 300 then
-		return true
-	end
+    -- debug: (uncomment if you want to see actual payload in output)
+    -- print("[DataMember] SaveUserData body:", body)
 
-	warn("[DataMember] SaveUserData status:", res.StatusCode, res.Body)
-	return false
+    local headers = defaultHeaders()
+    headers["Prefer"] = "resolution=merge-duplicates"
+
+    local ok, res = pcall(HttpRequest, {
+        Url = REST_MEMBERS .. "?on_conflict=user_id",
+        Method = "POST",
+        Headers = headers,
+        Body = body
+    })
+
+    if not ok or not res then
+        warn("[DataMember] SaveUserData failed: no response")
+        return false
+    end
+
+    if res.StatusCode >= 200 and res.StatusCode < 300 then
+        return true
+    end
+
+    warn("[DataMember] SaveUserData status:", res.StatusCode, res.Body)
+    return false
 end
 
 --==================================================
