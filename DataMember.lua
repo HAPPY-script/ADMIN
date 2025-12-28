@@ -64,7 +64,7 @@ end
 --==================================================
 local REAL_GAME_NAME = GetRealGameName()
 local CURRENT_GAME = REAL_GAME_NAME .. " (" .. game.PlaceId .. ")"
-local SAFE_GAME_KEY = MakeSafeKey(CURRENT_GAME)
+local SAFE_GAME_KEY = MakeSafeKey("place_" .. tostring(game.PlaceId))
 
 --==================================================
 --  SUPABASE HELPERS (GET + UPSERT)
@@ -217,6 +217,16 @@ local function ReportPlayer()
     print("[DataMember] Lưu/Report:", USERNAME, USERID, CURRENT_GAME)
 end
 
+local function findGameKeyByPlaceId(gamesTable, placeId)
+    if not gamesTable then return nil end
+    for key, entry in pairs(gamesTable) do
+        if type(entry) == "table" and entry.placeId and tonumber(entry.placeId) == tonumber(placeId) then
+            return key, entry
+        end
+    end
+    return nil
+end
+
 local function SaveGameIfNotExists()
     local uid = USERID
     local data = GetUserData()
@@ -244,13 +254,44 @@ local function SaveGameIfNotExists()
 
     data.Games = data.Games or {}
 
-    -- If already exists, do nothing
-    if data.Games[SAFE_GAME_KEY] then
-        -- already recorded, but ensure last_seen/online updated separately
+    -- If an entry already exists for this placeId under ANY key, replace it:
+    local existingKey, existingEntry = findGameKeyByPlaceId(data.Games, game.PlaceId)
+    if existingKey then
+        -- preserve original firstSeen if present
+        if existingEntry and existingEntry.firstSeen then
+            newGameEntry.firstSeen = existingEntry.firstSeen
+        end
+
+        -- if the existing key differs from our canonical SAFE_GAME_KEY, remove old key
+        if existingKey ~= SAFE_GAME_KEY then
+            data.Games[existingKey] = nil
+        end
+
+        -- write/update canonical key with new name (name updated), placeId and preserved firstSeen
+        data.Games[SAFE_GAME_KEY] = newGameEntry
+
+        -- update meta and persist
+        data.Online = true
+        data.LastSeen = os.time()
+        data.ID = uid
+        data.Username = USERNAME
+
+        local ok = SaveUserData({ ID = uid, Username = data.Username, Games = data.Games, Online = data.Online, LastSeen = data.LastSeen })
+        if ok then
+            print("[DataMember] Updated game name for placeId (replaced old key):", CURRENT_GAME)
+        else
+            warn("[DataMember] Failed to update game name for placeId:", CURRENT_GAME)
+        end
         return
     end
 
-    -- Add game locally, then PATCH only the games + meta
+    -- If already exists under canonical key, do nothing (still ensure meta updated elsewhere)
+    if data.Games[SAFE_GAME_KEY] then
+        -- already recorded under canonical key; ensure meta updated separately
+        return
+    end
+
+    -- Add game locally under canonical key, then PATCH only the games + meta
     data.Games[SAFE_GAME_KEY] = newGameEntry
     data.Online = true
     data.LastSeen = os.time()
