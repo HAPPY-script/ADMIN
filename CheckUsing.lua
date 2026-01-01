@@ -202,12 +202,11 @@ UICorner.Parent = Button
 -- SYSTEM
 --=============================================================================================================--
 
--- CheckMembersInServer_fixed.lua (LocalScript)
--- Client-only; expects each client to write ServerId = game.JobId to Firebase when online
+--==========================
+-- Config & Services
+--==========================
+local SCAN_INTERVAL = 2 -- seconds between checks when Main is visible
 
---==========================
--- Services & Helpers
---==========================
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 local TweenService = game:GetService("TweenService")
@@ -218,10 +217,23 @@ local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 local screen = playerGui:WaitForChild("CheckUsingScreen")
 
--- Firebase base
-local MEMBER_BASE = "https://happy-script-bada6-default-rtdb.asia-southeast1.firebasedatabase.app/Member/"
+-- SUPABASE / REST endpoint - sử dụng same project key như script Data của bạn
+local SUPABASE_BASE = "https://koqaxxefwuosiplczazy.supabase.co"
+local SUPABASE_KEY  = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtvcWF4eGVmd3V3b3NpbHBjemF6eSIsInJvbGUiOiJhbm9uIiwiaWF0IjoxNzY2MjcwNTQzLCJleHAiOjIwODE4NDY1NDN9.c_hoE6Kr3N9OEgS2WOUlDj-2-EL3H_CRzKO3RLbBlwU"
+local REST_MEMBERS = SUPABASE_BASE .. "/rest/v1/members"
 
--- Auto-detect http request
+local function defaultHeaders()
+	return {
+		["apikey"] = SUPABASE_KEY,
+		["Authorization"] = "Bearer " .. SUPABASE_KEY,
+		["Content-Type"] = "application/json",
+		["Accept"] = "application/json"
+	}
+end
+
+--==========================
+-- HTTP Request auto-detect
+--==========================
 local function HttpRequest(data)
 	if syn and syn.request then
 		return syn.request(data)
@@ -245,30 +257,8 @@ local function safeDecode(body)
 	return nil
 end
 
-local function MakeSafeKey(str)
-	return str:gsub("[.%$#%[%]/]", "_")
-end
-
-local function GetRealGameName()
-	local url = "https://games.roblox.com/v1/games?universeIds=" .. game.GameId
-	local ok, res = pcall(function() return HttpRequest({ Url = url, Method = "GET" }) end)
-	if not ok or not res or res.StatusCode ~= 200 then
-		return "Unknown Game"
-	end
-	local body = res.Body or res.body or res.Response
-	local data = safeDecode(body)
-	if data and data.data and data.data[1] and data.data[1].name then
-		return data.data[1].name
-	end
-	return "Unknown Game"
-end
-
-local REAL_GAME_NAME = GetRealGameName()
-local CURRENT_GAME = REAL_GAME_NAME .. " (" .. game.PlaceId .. ")"
-local SAFE_GAME_KEY = MakeSafeKey(CURRENT_GAME)
-
 --==========================
--- GUI selectors
+-- GUI selectors (giữ nguyên cấu trúc của bạn)
 --==========================
 local main = screen:WaitForChild("Main")
 local scrolling = main:WaitForChild("ScrollingFrame")
@@ -278,40 +268,14 @@ local button = screen:WaitForChild("Button")
 local overlayFrame = screen:WaitForChild("Frame")
 local overlayGradient = overlayFrame:FindFirstChildOfClass("UIGradient")
 
--- initial states
+-- initial states (giữ như cũ)
 main.Visible = false
 overlayFrame.Visible = false
 if overlayGradient then overlayGradient.Offset = Vector2.new(0, 1) end
 overlayFrame.BackgroundTransparency = 1
 
 --==========================
--- HTTP helpers
---==========================
-local function GetMemberDataByName(username)
-	local safeName = tostring(username):gsub(" ", "%%20")
-	local url = MEMBER_BASE .. safeName .. ".json"
-	local ok, res = pcall(function()
-		return HttpRequest({ Url = url, Method = "GET" })
-	end)
-	if not ok or not res then
-		return nil
-	end
-	local body = res.Body or res.body or res.Response or res
-	if not body or body == "null" then return nil end
-	return safeDecode(body)
-end
-
-local function GetAvatarUrl(userId, sizeEnum)
-	sizeEnum = sizeEnum or Enum.ThumbnailSize.Size48x48
-	local ok, thumbUrl = pcall(function()
-		return Players:GetUserThumbnailAsync(userId, Enum.ThumbnailType.HeadShot, sizeEnum)
-	end)
-	if ok and thumbUrl then return thumbUrl end
-	return nil
-end
-
---==========================
--- Build UI rows
+-- Row utilities
 --==========================
 local START_Y = 0.01
 local STEP_Y = 0.055
@@ -335,94 +299,184 @@ local function createRow(index, playerObj, avatarUrl)
 	local nameLabel = row:FindFirstChild("Name", true) or row:FindFirstChildOfClass("TextLabel")
 
 	if nameLabel and playerObj then nameLabel.Text = playerObj.Name end
-	if logo and avatarUrl then pcall(function() logo.Image = avatarUrl end) end
+	if logo and avatarUrl then
+		pcall(function() logo.Image = avatarUrl end)
+	end
 
 	row.Parent = scrolling
 	return row
 end
 
 --==========================
--- Online check (fixed): require ServerId == game.JobId
+-- Supabase: batch GET members by user_id
 --==========================
-local CHECK_LASTSEEN_THRESHOLD = 60 -- seconds
+local function buildIdQuery(ids)
+	-- ids: array of numeric user ids
+	if #ids == 0 then return nil end
+	-- ensure values are numbers/strings without spaces
+	local parts = {}
+	for _, id in ipairs(ids) do
+		table.insert(parts, tostring(id))
+	end
+	-- Supabase/PostgREST filter: user_id=in.(id1,id2,...)
+	return "user_id=in.(" .. table.concat(parts, ",") .. ")"
+end
 
-local function isMemberOnlineInThisServer(memberData)
-	if not memberData then return false end
-	if not memberData.Online then return false end
+local function GetMembersDataByUserIds(ids)
+	local filter = buildIdQuery(ids)
+	if not filter then return {} end
 
-	local last = tonumber(memberData.LastSeen) or 0
-	if os.time() - last > CHECK_LASTSEEN_THRESHOLD then
-		return false
+	-- select only needed fields to reduce payload
+	local url = REST_MEMBERS .. "?" .. filter .. "&select=user_id,username,online,last_seen"
+	local ok, res = pcall(function()
+		return HttpRequest({
+			Url = url,
+			Method = "GET",
+			Headers = defaultHeaders()
+		})
+	end)
+	if not ok or not res then
+		warn("[CheckMembers] HTTP request failed or executor returned nil")
+		return {}
+	end
+	if type(res) == "table" and (res.StatusCode == 204 or res.StatusCode == 200) and res.Body then
+		local decoded = safeDecode(res.Body)
+		if decoded and type(decoded) == "table" then
+			-- convert to map by user_id for O(1) lookup
+			local map = {}
+			for _, row in ipairs(decoded) do
+				-- ensure user_id present
+				local uid = tonumber(row.user_id) or tonumber(row.user_id and tostring(row.user_id))
+				if uid then
+					map[uid] = row
+				end
+			end
+			return map
+		end
 	end
 
-	-- IMPORTANT: require same server instance
-	-- memberData.ServerId must be written by each client when reporting (ServerId = game.JobId)
-	if tostring(memberData.ServerId) ~= tostring(game.JobId) then
-		return false
+	-- if fallback: try if res is a string containing JSON
+	if type(res) == "string" then
+		local decoded = safeDecode(res)
+		if decoded and type(decoded) == "table" then
+			local map = {}
+			for _, row in ipairs(decoded) do
+				local uid = tonumber(row.user_id) or tonumber(row.user_id and tostring(row.user_id))
+				if uid then map[uid] = row end
+			end
+			return map
+		end
 	end
 
-	-- optional: keep game check if you want, but ServerId is authoritative
-	-- if memberData.Games and not memberData.Games[SAFE_GAME_KEY] then return false end
-
-	return true
+	-- failure -> return empty map
+	return {}
 end
 
 --==========================
--- RefreshMemberList (robust)
+-- Avatar helper (optional, non-blocking)
+--==========================
+local function GetAvatarUrl(userId, sizeEnum)
+	sizeEnum = sizeEnum or Enum.ThumbnailSize.Size48x48
+	local ok, thumbUrl = pcall(function()
+		return Players:GetUserThumbnailAsync(userId, Enum.ThumbnailType.HeadShot, sizeEnum)
+	end)
+	if ok and thumbUrl then return thumbUrl end
+	return nil
+end
+
+--==========================
+-- RefreshMemberList (batch, non-blocking)
 --==========================
 local function RefreshMemberList()
+	-- Guard: only run if menu is visible
+	if not main or not main.Visible then return end
+
 	clearOldRows()
 
 	local players = Players:GetPlayers()
-	local confirmed = {}
-	local pending = #players
-	local timeout = 1.0 -- seconds max to wait for all HTTPs
-	local startTime = tick()
+	if #players == 0 then return end
 
-	if pending == 0 then return end
-
-	-- spawn requests in parallel and mark complete by decrementing pending
+	-- build id list for batch request
+	local ids = {}
 	for _, plr in ipairs(players) do
-		task.spawn(function()
-			local ok, data = pcall(GetMemberDataByName, plr.Name)
-			if ok and data and isMemberOnlineInThisServer(data) then
-				local avatar = GetAvatarUrl(plr.UserId, Enum.ThumbnailSize.Size48x48)
-				table.insert(confirmed, { player = plr, avatar = avatar })
-			end
-			pending = pending - 1
-		end)
+		if plr and plr.UserId and plr.UserId > 0 then
+			table.insert(ids, plr.UserId)
+		end
+	end
+	if #ids == 0 then return end
+
+	-- single batch GET
+	local dataMap = GetMembersDataByUserIds(ids)
+	-- dataMap keyed by numeric user_id
+
+	-- Build confirmed list (preserve ordering by player name for stable UI)
+	local confirmed = {}
+	for _, plr in ipairs(players) do
+		local row = dataMap[plr.UserId]
+		if row and (row.online == true or tostring(row.online) == "true" or tonumber(row.online) == 1) then
+			table.insert(confirmed, { player = plr })
+		end
 	end
 
-	-- wait until all done or timeout
-	while pending > 0 and (tick() - startTime) < timeout do
-		task.wait(0.03)
-	end
+	table.sort(confirmed, function(a, b) return a.player.Name:lower() < b.player.Name:lower() end)
 
-	-- if some still pending, they'll be ignored (fail-safe)
-
-	-- stable ordering (optional)
-	table.sort(confirmed, function(a, b) return a.player.Name < b.player.Name end)
-
+	-- populate rows; we can fetch avatar async but keep simple (synchronous Avatar call is okay small scale)
 	for idx, info in ipairs(confirmed) do
-		createRow(idx, info.player, info.avatar)
+		local avatar = nil
+		-- pcall avatar (not critical)
+		pcall(function()
+			avatar = GetAvatarUrl(info.player.UserId, Enum.ThumbnailSize.Size48x48)
+		end)
+		createRow(idx, info.player, avatar)
 	end
 end
 
--- initial
-RefreshMemberList()
+--==========================
+-- Polling control: start/stop when Main visible
+--==========================
+local pollRunning = false
+local pollThread = nil
 
--- refresh on player join/leave
-Players.PlayerAdded:Connect(function()
-	task.wait(1)
-	RefreshMemberList()
+local function startPolling()
+	if pollRunning then return end
+	pollRunning = true
+	pollThread = task.spawn(function()
+		-- first immediate refresh
+		pcall(RefreshMemberList)
+		while pollRunning and main and main.Visible do
+			local ok = pcall(function() RefreshMemberList() end)
+			-- wait SCAN_INTERVAL but yield safely
+			for i = 1, math.max(1, math.floor(SCAN_INTERVAL / 0.1)) do
+				if not pollRunning or not main or not main.Visible then break end
+				task.wait(0.1)
+			end
+		end
+		pollRunning = false
+		pollThread = nil
+	end)
+end
+
+local function stopPolling()
+	pollRunning = false
+	-- pollThread will finish on its own
+end
+
+-- Hook player join/leave to refresh immediately if menu open (keeps UI responsive)
+Players.PlayerAdded:Connect(function(plr)
+	if main and main.Visible then
+		task.wait(0.3)
+		pcall(RefreshMemberList)
+	end
 end)
-Players.PlayerRemoving:Connect(function()
-	task.wait(0.5)
-	RefreshMemberList()
+Players.PlayerRemoving:Connect(function(plr)
+	if main and main.Visible then
+		task.wait(0.1)
+		pcall(RefreshMemberList)
+	end
 end)
 
 --==========================
--- Overlay open/close (kept as before)
+-- Overlay open/close (kept but start/stop polling appropriately)
 --==========================
 local PHASE_DURATION = 0.20
 local PHASE_TWEEN = TweenInfo.new(PHASE_DURATION, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
@@ -469,6 +523,8 @@ local function openMainSequence()
 			if overlayGradient then overlayGradient.Offset = Vector2.new(0, 1) end
 			animating = false
 			menuOpen = true
+			-- Start polling when fully open
+			startPolling()
 		end)
 	end)
 end
@@ -490,6 +546,8 @@ local function closeMainSequence()
 			if overlayGradient then overlayGradient.Offset = Vector2.new(0, 1) end
 			animating = false
 			menuOpen = false
+			-- Stop polling when closed
+			stopPolling()
 		end)
 	end)
 end
@@ -500,7 +558,7 @@ local function toggleMain()
 end
 
 --==========================
--- Drag + Click for floating button
+-- Drag + Click for floating button (kept as before)
 --==========================
 do
 	local btn = button
@@ -546,3 +604,9 @@ do
 		end
 	end)
 end
+
+-- Ensure UI initially hidden (kept)
+main.Visible = false
+overlayFrame.Visible = false
+if overlayGradient then overlayGradient.Offset = Vector2.new(0, 1) end
+overlayFrame.BackgroundTransparency = 1
