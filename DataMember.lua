@@ -1,17 +1,11 @@
-local SUPABASE_BASE = "https://koqaxxefwuosiplczazy.supabase.co"
-local SUPABASE_KEY  = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtvcWF4eGVmd3Vvc2lwbGN6YXp5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjYyNzA1NDMsImV4cCI6MjA4MTg0NjU0M30.c_hoE6Kr3N9OEgS2WOUlDj-2-EL3H_CRzKO3RLbBlwU"
-local REST_MEMBERS = SUPABASE_BASE .. "/rest/v1/members"
+local WORKER_URL = "https://supabase.happy37135535.workers.dev/"
+local WORKER_SECRET = nil
+
+local SUPABASE_BASE = nil
+local SUPABASE_KEY  = nil
 
 --==================================================
---  FIREBASE MAINTENANCE SWITCH (kept)
---==================================================
-if getgenv().RestFireBase == true then
-	warn("[DataMember] Database đang bảo trì, hệ thống tạm dừng")
-	return
-end
-
---==================================================
---  HTTP REQUEST AUTO-DETECT (kept)
+--  HTTP REQUEST AUTO-DETECT (giữ nguyên)
 --==================================================
 local function HttpRequest(data)
 	if syn and syn.request then
@@ -36,8 +30,8 @@ local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
 local HttpService = game:GetService("HttpService")
 
-local USERNAME = LocalPlayer.Name
-local USERID = LocalPlayer.UserId
+local USERNAME = LocalPlayer and LocalPlayer.Name or "Unknown"
+local USERID = LocalPlayer and LocalPlayer.UserId or 0
 
 --==================================================
 --  UTILS
@@ -47,13 +41,13 @@ local function MakeSafeKey(str)
 end
 
 local function GetRealGameName()
-	local url = "https://games.roblox.com/v1/games?universeIds=" .. game.GameId
-	local res = HttpRequest({ Url = url, Method = "GET" })
-	if not res or res.StatusCode ~= 200 then
+	local url = "https://games.roblox.com/v1/games?universeIds=" .. tostring(game.GameId)
+	local ok, res = pcall(HttpRequest, { Url = url, Method = "GET" })
+	if not ok or not res or res.StatusCode ~= 200 then
 		return "Unknown Game"
 	end
-	local ok, data = pcall(function() return HttpService:JSONDecode(res.Body) end)
-	if ok and data and data.data and data.data[1] and data.data[1].name then
+	local success, data = pcall(function() return HttpService:JSONDecode(res.Body) end)
+	if success and data and data.data and data.data[1] and data.data[1].name then
 		return data.data[1].name
 	end
 	return "Unknown Game"
@@ -63,247 +57,141 @@ end
 --  GAME INFO
 --==================================================
 local REAL_GAME_NAME = GetRealGameName()
-local CURRENT_GAME = REAL_GAME_NAME .. " (" .. game.PlaceId .. ")"
+local CURRENT_GAME = REAL_GAME_NAME .. " (" .. tostring(game.PlaceId) .. ")"
 local SAFE_GAME_KEY = MakeSafeKey("place_" .. tostring(game.PlaceId))
 
 --==================================================
---  SUPABASE HELPERS (GET + UPSERT)
+--  WORKER SENDER + QUEUE
 --==================================================
-local function defaultHeaders()
-	return {
-		["apikey"] = SUPABASE_KEY,
-		["Authorization"] = "Bearer " .. SUPABASE_KEY,
-		["Content-Type"] = "application/json",
-		["Accept"] = "application/json"
+local pendingQueue = {} -- lưu payload nếu gửi thất bại
+local queueLock = false
+
+local function buildHeaders()
+	local h = {
+		["Content-Type"] = "application/json"
 	}
-end
-
--- Lấy record member theo user_id (trả về nil nếu không có)
-local function GetUserData()
-	local url = REST_MEMBERS .. "?user_id=eq." .. tostring(USERID) .. "&select=*"
-	local ok, res = pcall(HttpRequest, { Url = url, Method = "GET", Headers = defaultHeaders() })
-	if not ok or not res then return nil end
-	if res.StatusCode ~= 200 then
-		-- không tồn tại hoặc lỗi
-		return nil
+	if WORKER_SECRET and WORKER_SECRET ~= "" then
+		h["X-Worker-Secret"] = WORKER_SECRET
 	end
-	local success, body = pcall(function() return HttpService:JSONDecode(res.Body) end)
-	if not success or type(body) ~= "table" or #body == 0 then
-		return nil
+	return h
+end
+
+local function sendHttpPayload(payload)
+	local body = nil
+	local okEnc, s = pcall(function() return HttpService:JSONEncode(payload) end)
+	if not okEnc then
+		warn("[DataMember] JSONEncode failed for payload")
+		return false
 	end
-	return body[1] -- PostgREST trả về mảng
+	body = s
+
+	local ok, res = pcall(HttpRequest, {
+		Url = WORKER_URL,
+		Method = "POST",
+		Headers = buildHeaders(),
+		Body = body
+	})
+	if not ok or not res then
+		return false
+	end
+	-- treat 2xx as success
+	if res.StatusCode >= 200 and res.StatusCode < 300 then
+		return true
+	end
+	return false
 end
 
-local function safeJsonEncode(t)
-    local ok, s = pcall(function() return HttpService:JSONEncode(t) end)
-    if ok and type(s) == "string" then return s end
-    return "{}"
+local function enqueuePayload(payload)
+	table.insert(pendingQueue, payload)
 end
 
--- SaveUserData: INSERT if no row exists, otherwise PATCH the merged games (and update meta)
-local function SaveUserData(data)
-    local uid = data.ID or USERID
-    local uname = data.Username or USERNAME
-    local gamesTable = data.Games or {}
-    local onlineVal = (data.Online == true)
-    local lastSeenVal = data.LastSeen or os.time()
+local function tryFlushQueue()
+	if queueLock then return end
+	if #pendingQueue == 0 then return end
+	queueLock = true
+	local i = 1
+	while i <= #pendingQueue do
+		local payload = pendingQueue[i]
+		local ok = sendHttpPayload(payload)
+		if ok then
+			-- remove element i
+			table.remove(pendingQueue, i)
+			-- do not advance i (next element shifted into position i)
+		else
+			-- failed: keep it and move to next
+			i = i + 1
+		end
+		-- avoid tight loop; yield a tick so other tasks run
+		task.wait(0.01)
+	end
+	queueLock = false
+end
 
-    -- Check if record exists
-    local existing = GetUserData() -- returns full row or nil
-    if existing then
-        -- Merge existing.games and gamesTable without removing old keys
-        local merged = {}
-        -- existing.games may be nil or JSON decoded table
-        if existing.games and type(existing.games) == "table" then
-            for k,v in pairs(existing.games) do merged[k] = v end
-        end
-        if gamesTable and type(gamesTable) == "table" then
-            for k,v in pairs(gamesTable) do
-                -- only add if not exists (avoid replacing existing game entry)
-                if merged[k] == nil then
-                    merged[k] = v
-                end
-            end
-        end
+-- background flush: thử gửi lại hàng đợi mỗi 30s
+task.spawn(function()
+	while true do
+		tryFlushQueue()
+		task.wait(30)
+	end
+end)
 
-        -- Build body to PATCH only the fields we want to update
-        local bodyObj = {
-            username = uname,
-            last_seen = lastSeenVal,
-            online = onlineVal,
-            games = merged
-        }
-        local body = safeJsonEncode(bodyObj)
-
-        local ok, res = pcall(HttpRequest, {
-            Url = REST_MEMBERS .. "?user_id=eq." .. tostring(uid),
-            Method = "PATCH",
-            Headers = defaultHeaders(),
-            Body = body
-        })
-
-        if not ok or not res then
-            warn("[DataMember] SaveUserData PATCH failed: no response")
-            return false
-        end
-        if res.StatusCode >= 200 and res.StatusCode < 300 then
-            return true
-        end
-        warn("[DataMember] SaveUserData PATCH status:", res.StatusCode, res.Body)
-        return false
-    else
-        -- No existing row: create new record via POST (use on_conflict just in case)
-        local payload = {
-            user_id = uid,
-            username = uname,
-            games = gamesTable,
-            online = onlineVal,
-            last_seen = lastSeenVal
-        }
-        local body = safeJsonEncode(payload)
-
-        local headers = defaultHeaders()
-        headers["Prefer"] = "resolution=merge-duplicates"
-
-        local ok, res = pcall(HttpRequest, {
-            Url = REST_MEMBERS .. "?on_conflict=user_id",
-            Method = "POST",
-            Headers = headers,
-            Body = body
-        })
-
-        if not ok or not res then
-            warn("[DataMember] SaveUserData POST failed: no response")
-            return false
-        end
-        if res.StatusCode >= 200 and res.StatusCode < 300 then
-            return true
-        end
-        warn("[DataMember] SaveUserData POST status:", res.StatusCode, res.Body)
-        return false
-    end
+-- wrapper an toàn: sẽ gửi ngay, hoặc lưu hàng đợi nếu thất bại
+local function SendToWorkerAsync(payload)
+	task.spawn(function()
+		local ok = sendHttpPayload(payload)
+		if not ok then
+			-- lưu để retry
+			enqueuePayload(payload)
+			warn("[DataMember] SendToWorker failed - queued for retry")
+		end
+	end)
 end
 
 --==================================================
---  REPORT + ONLINE STATUS
+--  PUBLIC ACTIONS => gửi action cho Worker xử lý
+--  Worker của bạn nên chấp nhận các action: "save_game", "update_online", "report"
 --==================================================
 local function UpdateOnlineStatus(isOnline)
-    local uid = USERID
-    local body = safeJsonEncode({
-        online = isOnline == true,
-        last_seen = os.time()
-    })
-
-    local ok, res = pcall(HttpRequest, {
-        Url = REST_MEMBERS .. "?user_id=eq." .. tostring(uid),
-        Method = "PATCH",
-        Headers = defaultHeaders(),
-        Body = body
-    })
-    if not ok or not res then
-        warn("[DataMember] UpdateOnlineStatus failed: no response")
-        return false
-    end
-    if res.StatusCode >= 200 and res.StatusCode < 300 then
-        return true
-    end
-    -- if 404/204 etc handle as needed
-    return false
-end
-
-local function ReportPlayer()
-    SaveGameIfNotExists()
-    UpdateOnlineStatus(true)
-    print("[DataMember] Lưu/Report:", USERNAME, USERID, CURRENT_GAME)
-end
-
-local function findGameKeyByPlaceId(gamesTable, placeId)
-    if not gamesTable then return nil end
-    for key, entry in pairs(gamesTable) do
-        if type(entry) == "table" and entry.placeId and tonumber(entry.placeId) == tonumber(placeId) then
-            return key, entry
-        end
-    end
-    return nil
+	local payload = {
+		action = "update_online",
+		user_id = USERID,
+		online = (isOnline == true),
+		last_seen = os.time()
+	}
+	SendToWorkerAsync(payload)
 end
 
 local function SaveGameIfNotExists()
-    local uid = USERID
-    local data = GetUserData()
+	local newGameEntry = {
+		name = REAL_GAME_NAME,
+		placeId = game.PlaceId,
+		firstSeen = os.time()
+	}
 
-    local newGameEntry = {
-        name = REAL_GAME_NAME,
-        placeId = game.PlaceId,
-        firstSeen = os.time()
-    }
+	local payload = {
+		action = "save_game",
+		user_id = USERID,
+		username = USERNAME,
+		games = { [SAFE_GAME_KEY] = newGameEntry },
+		online = true,
+		last_seen = os.time()
+	}
 
-    -- if no record, create one with this single game
-    if not data then
-        local payload = {
-            ID = uid,
-            Username = USERNAME,
-            Games = { [SAFE_GAME_KEY] = newGameEntry },
-            Online = true,
-            LastSeen = os.time()
-        }
-        -- SaveUserData will POST
-        SaveUserData(payload)
-        print("[DataMember] Created new member with initial game:", CURRENT_GAME)
-        return
-    end
+	SendToWorkerAsync(payload)
+end
 
-    data.Games = data.Games or {}
-
-    -- If an entry already exists for this placeId under ANY key, replace it:
-    local existingKey, existingEntry = findGameKeyByPlaceId(data.Games, game.PlaceId)
-    if existingKey then
-        -- preserve original firstSeen if present
-        if existingEntry and existingEntry.firstSeen then
-            newGameEntry.firstSeen = existingEntry.firstSeen
-        end
-
-        -- if the existing key differs from our canonical SAFE_GAME_KEY, remove old key
-        if existingKey ~= SAFE_GAME_KEY then
-            data.Games[existingKey] = nil
-        end
-
-        -- write/update canonical key with new name (name updated), placeId and preserved firstSeen
-        data.Games[SAFE_GAME_KEY] = newGameEntry
-
-        -- update meta and persist
-        data.Online = true
-        data.LastSeen = os.time()
-        data.ID = uid
-        data.Username = USERNAME
-
-        local ok = SaveUserData({ ID = uid, Username = data.Username, Games = data.Games, Online = data.Online, LastSeen = data.LastSeen })
-        if ok then
-            print("[DataMember] Updated game name for placeId (replaced old key):", CURRENT_GAME)
-        else
-            warn("[DataMember] Failed to update game name for placeId:", CURRENT_GAME)
-        end
-        return
-    end
-
-    -- If already exists under canonical key, do nothing (still ensure meta updated elsewhere)
-    if data.Games[SAFE_GAME_KEY] then
-        -- already recorded under canonical key; ensure meta updated separately
-        return
-    end
-
-    -- Add game locally under canonical key, then PATCH only the games + meta
-    data.Games[SAFE_GAME_KEY] = newGameEntry
-    data.Online = true
-    data.LastSeen = os.time()
-    data.ID = uid
-    data.Username = USERNAME
-
-    local ok = SaveUserData({ ID = uid, Username = data.Username, Games = data.Games, Online = data.Online, LastSeen = data.LastSeen })
-    if ok then
-        print("[DataMember] Thêm game mới:", CURRENT_GAME)
-    else
-        warn("[DataMember] Không thể thêm game:", CURRENT_GAME)
-    end
+local function ReportPlayer()
+	-- gửi một báo cáo ngắn cho Worker; Worker sẽ gom/patch lên DB
+	local payload = {
+		action = "report",
+		user_id = USERID,
+		username = USERNAME,
+		placeId = game.PlaceId,
+		game = REAL_GAME_NAME,
+		online = true,
+		last_seen = os.time()
+	}
+	SendToWorkerAsync(payload)
 end
 
 --==================================================
@@ -325,4 +213,4 @@ Players.PlayerRemoving:Connect(function(plr)
 	end
 end)
 
-print("✅Done DataMember")
+print("✅ Done DataMember (worker-backed)")
