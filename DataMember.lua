@@ -1,11 +1,15 @@
 local WORKER_URL = "https://supabase.happy37135535.workers.dev/"
-local WORKER_SECRET = nil
-
-local SUPABASE_BASE = nil
-local SUPABASE_KEY  = nil
 
 --==================================================
---  HTTP REQUEST AUTO-DETECT (giữ nguyên)
+--  FIREBASE MAINTENANCE SWITCH (kept)
+--==================================================
+if getgenv().RestFireBase == true then
+	warn("[DataMember] Database đang bảo trì, hệ thống tạm dừng")
+	return
+end
+
+--==================================================
+--  HTTP REQUEST AUTO-DETECT (kept)
 --==================================================
 local function HttpRequest(data)
 	if syn and syn.request then
@@ -40,15 +44,27 @@ local function MakeSafeKey(str)
 	return str:gsub("[.%$#%[%]/]", "_")
 end
 
+local function safeJsonEncode(t)
+    local ok, s = pcall(function() return HttpService:JSONEncode(t) end)
+    if ok and type(s) == "string" then return s end
+    return "{}"
+end
+
+local function safeJsonDecode(s)
+    local ok, t = pcall(function() return HttpService:JSONDecode(s) end)
+    if ok then return t end
+    return nil
+end
+
 local function GetRealGameName()
-	local url = "https://games.roblox.com/v1/games?universeIds=" .. tostring(game.GameId)
+	local url = "https://games.roblox.com/v1/games?universeIds=" .. game.GameId
 	local ok, res = pcall(HttpRequest, { Url = url, Method = "GET" })
 	if not ok or not res or res.StatusCode ~= 200 then
 		return "Unknown Game"
 	end
-	local success, data = pcall(function() return HttpService:JSONDecode(res.Body) end)
-	if success and data and data.data and data.data[1] and data.data[1].name then
-		return data.data[1].name
+	local body = safeJsonDecode(res.Body)
+	if body and body.data and type(body.data) == "table" and body.data[1] and body.data[1].name then
+		return body.data[1].name
 	end
 	return "Unknown Game"
 end
@@ -61,137 +77,126 @@ local CURRENT_GAME = REAL_GAME_NAME .. " (" .. tostring(game.PlaceId) .. ")"
 local SAFE_GAME_KEY = MakeSafeKey("place_" .. tostring(game.PlaceId))
 
 --==================================================
---  WORKER SENDER + QUEUE
+--  SEND TO WORKER (primary change)
+--  Worker chịu trách nhiệm gom + upsert vào Supabase
 --==================================================
-local pendingQueue = {} -- lưu payload nếu gửi thất bại
-local queueLock = false
-
-local function buildHeaders()
-	local h = {
+local function SendToWorker(payload)
+	local headers = {
 		["Content-Type"] = "application/json"
 	}
-	if WORKER_SECRET and WORKER_SECRET ~= "" then
-		h["X-Worker-Secret"] = WORKER_SECRET
+	-- If you set getgenv().WorkerSecret = "xxx", it'll be sent in header for Worker auth
+	if getgenv().WorkerSecret then
+		headers["X-Worker-Secret"] = tostring(getgenv().WorkerSecret)
 	end
-	return h
-end
 
-local function sendHttpPayload(payload)
-	local body = nil
-	local okEnc, s = pcall(function() return HttpService:JSONEncode(payload) end)
-	if not okEnc then
-		warn("[DataMember] JSONEncode failed for payload")
-		return false
-	end
-	body = s
+	local body = safeJsonEncode(payload)
 
-	local ok, res = pcall(HttpRequest, {
-		Url = WORKER_URL,
-		Method = "POST",
-		Headers = buildHeaders(),
-		Body = body
-	})
-	if not ok or not res then
-		return false
-	end
-	-- treat 2xx as success
-	if res.StatusCode >= 200 and res.StatusCode < 300 then
-		return true
-	end
-	return false
-end
+	-- Retry loop: 3 attempts with small backoff
+	for attempt = 1, 3 do
+		local ok, res = pcall(HttpRequest, {
+			Url = WORKER_URL,
+			Method = "POST",
+			Headers = headers,
+			Body = body
+		})
 
-local function enqueuePayload(payload)
-	table.insert(pendingQueue, payload)
-end
-
-local function tryFlushQueue()
-	if queueLock then return end
-	if #pendingQueue == 0 then return end
-	queueLock = true
-	local i = 1
-	while i <= #pendingQueue do
-		local payload = pendingQueue[i]
-		local ok = sendHttpPayload(payload)
-		if ok then
-			-- remove element i
-			table.remove(pendingQueue, i)
-			-- do not advance i (next element shifted into position i)
-		else
-			-- failed: keep it and move to next
-			i = i + 1
+		if ok and res and res.StatusCode and res.StatusCode >= 200 and res.StatusCode < 300 then
+			return true, res
 		end
-		-- avoid tight loop; yield a tick so other tasks run
-		task.wait(0.01)
-	end
-	queueLock = false
-end
 
--- background flush: thử gửi lại hàng đợi mỗi 30s
-task.spawn(function()
-	while true do
-		tryFlushQueue()
-		task.wait(30)
+		-- exponential-ish backoff (non-blocking)
+		local waitTime = 0.25 * attempt
+		task.wait(waitTime)
 	end
-end)
 
--- wrapper an toàn: sẽ gửi ngay, hoặc lưu hàng đợi nếu thất bại
-local function SendToWorkerAsync(payload)
-	task.spawn(function()
-		local ok = sendHttpPayload(payload)
-		if not ok then
-			-- lưu để retry
-			enqueuePayload(payload)
-			warn("[DataMember] SendToWorker failed - queued for retry")
-		end
-	end)
+	return false, "failed after retries"
 end
 
 --==================================================
---  PUBLIC ACTIONS => gửi action cho Worker xử lý
---  Worker của bạn nên chấp nhận các action: "save_game", "update_online", "report"
+--  Save / Update (client now sends to Worker)
+--  Worker sẽ xử lý merge/insert/upsert vào Supabase
 --==================================================
+local function SaveUserData(data)
+    -- Build payload describing desired upsert/update.
+    -- Let Worker handle whether to create or merge existing.
+    local payload = {
+        action = "upsert_user", -- for readability on server logs; Worker may ignore
+        user_id = data.ID or USERID,
+        username = data.Username or USERNAME,
+        games = data.Games or {},
+        online = (data.Online == true),
+        last_seen = data.LastSeen or os.time()
+    }
+
+    local ok, res = SendToWorker(payload)
+    if not ok then
+        warn("[DataMember] SaveUserData: failed to send to worker:", res)
+        return false
+    end
+    return true
+end
+
 local function UpdateOnlineStatus(isOnline)
-	local payload = {
-		action = "update_online",
-		user_id = USERID,
-		online = (isOnline == true),
-		last_seen = os.time()
-	}
-	SendToWorkerAsync(payload)
+    local payload = {
+        action = "update_online",
+        user_id = USERID,
+        online = (isOnline == true),
+        last_seen = os.time()
+    }
+
+    local ok, res = SendToWorker(payload)
+    if not ok then
+        warn("[DataMember] UpdateOnlineStatus failed:", res)
+        return false
+    end
+    return true
+end
+
+--==================================================
+--  REPORT + GAME MANAGEMENT (kept semantics)
+--  Các hàm giờ chỉ gửi intent -> Worker sẽ thực hiện merge / upsert
+--==================================================
+local function ReportPlayer()
+    SaveGameIfNotExists()
+    UpdateOnlineStatus(true)
+    print("[DataMember] Lưu/Report:", USERNAME, USERID, CURRENT_GAME)
+end
+
+local function findGameKeyByPlaceId(gamesTable, placeId)
+    if not gamesTable then return nil end
+    for key, entry in pairs(gamesTable) do
+        if type(entry) == "table" and entry.placeId and tonumber(entry.placeId) == tonumber(placeId) then
+            return key, entry
+        end
+    end
+    return nil
 end
 
 local function SaveGameIfNotExists()
-	local newGameEntry = {
-		name = REAL_GAME_NAME,
-		placeId = game.PlaceId,
-		firstSeen = os.time()
-	}
+    -- New approach: don't GET from DB on client. Instead send desired state to Worker,
+    -- Worker sẽ kiểm tra tồn tại/merge/upsert khi flush.
+    local newGameEntry = {
+        name = REAL_GAME_NAME,
+        placeId = game.PlaceId,
+        firstSeen = os.time()
+    }
 
-	local payload = {
-		action = "save_game",
-		user_id = USERID,
-		username = USERNAME,
-		games = { [SAFE_GAME_KEY] = newGameEntry },
-		online = true,
-		last_seen = os.time()
-	}
+    local payload = {
+        action = "ensure_game",
+        user_id = USERID,
+        username = USERNAME,
+        game_key = SAFE_GAME_KEY,
+        game_entry = newGameEntry,
+        online = true,
+        last_seen = os.time()
+    }
 
-	SendToWorkerAsync(payload)
-end
-
-local function ReportPlayer()
-	-- gửi một báo cáo ngắn cho Worker; Worker sẽ gom/patch lên DB
-	local payload = {
-		action = "report",
-		user_id = USERID,
-		username = USERNAME,
-		placeId = game.PlaceId,
-		game = REAL_GAME_NAME,
-		online = true,
-		last_seen = os.time()
-	}
-	SendToWorkerAsync(payload)
+    local ok, res = SendToWorker(payload)
+    if ok then
+        print("[DataMember] Requested ensure_game:", CURRENT_GAME)
+    else
+        warn("[DataMember] Failed ensure_game request:", res)
+    end
 end
 
 --==================================================
@@ -213,4 +218,4 @@ Players.PlayerRemoving:Connect(function(plr)
 	end
 end)
 
-print("✅ Done DataMember (worker-backed)")
+print("✅ Done DataMember (proxy -> Worker)")
