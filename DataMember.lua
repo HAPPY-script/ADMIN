@@ -3,7 +3,7 @@ local WORKER_URL = "https://supabase.happy37135535.workers.dev/"
 --==================================================
 --  FIREBASE MAINTENANCE SWITCH (kept)
 --==================================================
-if getgenv().RestFireBase == true then
+if getgenv().DataMember = false then
 	warn("[DataMember] Database đang bảo trì, hệ thống tạm dừng")
 	return
 end
