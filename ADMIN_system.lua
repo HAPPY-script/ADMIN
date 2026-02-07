@@ -8,8 +8,9 @@ local OWNER_ID = 7326395533
 -- Danh sách admins (KHÔNG bao gồm OWNER_ID)
 local ADMINS = {
     ["Happy_devlop"] = true,
+    ["trungtran38740"] = true,
+    ["Happy_bmg0"] = true,
     [4333331142] = true,
-    -- thêm userId khác nếu cần: [123456789] = true
 }
 
 local function isAdmin(plr)
