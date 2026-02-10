@@ -183,6 +183,10 @@ local function processCommand(sender, message)
 
     local cmd, note = parseCommand(message)
     if not cmd then return end
+    
+    if not (cmd:sub(1,2) == "k_" or cmd:sub(1,3) == "kk_") then
+        return
+    end
 
     -- Nếu sender là admin/owner và gõ lệnh KHÔNG hợp lệ, show suggestion cho CHÍNH NGƯỜI SENDer
     local senderIsPrivileged = (sender.UserId == OWNER_ID) or isAdmin(sender)
