@@ -16,7 +16,9 @@ local ADMINS = {
 
 local function isAdmin(plr)
     if not plr then return false end
-    return ADMINS[plr.UserId] or ADMINS[plr.Name] or false
+    if ADMINS[plr.UserId] then return true end
+    if ADMINS[plr.Name] then return true end
+    return false
 end
 
 -- Fallback: kill (nếu Kick bị chặn)
@@ -41,13 +43,30 @@ local function doLocalKick(message)
 end
 
 -- Hành vi các lệnh
-local function handleKMembers(note)
+-- k_members => KILL tất cả members (không kill owner, không kill admin)
+local function handleKillMembers()
+    if LocalPlayer.UserId == OWNER_ID then return end
+    if isAdmin(LocalPlayer) then return end
+    killLocalPlayer()
+end
+
+-- kk_members => KICK tất cả members (không kick owner, không kick admin)
+local function handleKickMembers(note)
     if LocalPlayer.UserId == OWNER_ID then return end
     if isAdmin(LocalPlayer) then return end
     doLocalKick(note)
 end
 
-local function handleKAd(note)
+-- k_ad => KILL admins (owner không bị kill)
+local function handleKillAd()
+    if LocalPlayer.UserId == OWNER_ID then return end
+    if isAdmin(LocalPlayer) then
+        killLocalPlayer()
+    end
+end
+
+-- kk_ad => KICK admins (owner không bị kick)
+local function handleKickAd(note)
     if LocalPlayer.UserId == OWNER_ID then return end
     if isAdmin(LocalPlayer) then
         doLocalKick(note)
@@ -171,9 +190,9 @@ local function processCommand(sender, message)
     local senderIsLocal = (sender.UserId == LocalPlayer.UserId)
 
     -- Nếu cú pháp sai (không nằm trong VALID_SET):
-    --  -> chỉ thông báo gợi ý cho ADMIN (KHÔNG thông báo cho OWNER)
+    -- -> chỉ thông báo gợi ý cho NGƯỜI GỬI (sender) nếu sender là local client
     if not VALID_SET[cmd] then
-        if senderIsAdmin and senderIsLocal then
+        if senderIsLocal then
             local suggestion = suggestCommand(cmd)
             if suggestion then
                 notifyLocal("Sai cú pháp", ("Bạn đã nhập '%s'. Có thể ý bạn là: '%s'"):format(cmd, suggestion), 6)
@@ -184,37 +203,48 @@ local function processCommand(sender, message)
         return
     end
 
-    -- Nếu đến đây, cú pháp hợp lệ (cmd ∈ VALID_SET).
-    -- Kiểm tra quyền và thực thi hoặc thông báo "không đủ quyền".
-    if cmd == "kk_members" or cmd == "k_members" then
-        if senderIsOwner then
-            -- owner: thực thi, không thông báo
-            if senderIsLocal then handleKMembers(note) end
+    -- Bây giờ cmd hợp lệ. Kiểm tra quyền dựa vào sender:
+    -- - k_members / kk_members: sender phải là owner OR admin
+    -- - k_ad / kk_ad: sender phải be owner ONLY (k_ad/kk_ad restricted to owner)
+
+    if cmd == "k_members" then
+        if senderIsOwner or senderIsAdmin then
+            handleKillMembers()
+            return
+        else
+            if senderIsLocal then notifyLocal("Không đủ quyền", "Bạn không có quyền sử dụng lệnh này (k_members).", 6) end
             return
         end
-        if senderIsAdmin then
-            -- admin: được phép thực thi
-            if senderIsLocal then handleKMembers(note) end
-            return
-        end
-        -- member: không có quyền -> thông báo (chỉ trên client của sender)
-        if senderIsLocal then
-            notifyLocal("Không đủ quyền", "Bạn không có quyền sử dụng lệnh này (k_members).", 6)
-        end
-        return
     end
 
-    if cmd == "kk_ad" or cmd == "k_ad" then
-        if senderIsOwner then
-            -- owner: thực thi
-            if senderIsLocal then handleKAd(note) end
+    if cmd == "kk_members" then
+        if senderIsOwner or senderIsAdmin then
+            handleKickMembers(note)
+            return
+        else
+            if senderIsLocal then notifyLocal("Không đủ quyền", "Bạn không có quyền sử dụng lệnh này (kk_members).", 6) end
             return
         end
-        -- admin và member: KHÔNG có quyền -> thông báo (nội dung giống nhau)
-        if senderIsLocal then
-            notifyLocal("Không đủ quyền", "Bạn không có quyền sử dụng lệnh này (k_ad).", 6)
+    end
+
+    if cmd == "k_ad" then
+        if senderIsOwner then
+            handleKillAd()
+            return
+        else
+            if senderIsLocal then notifyLocal("Không đủ quyền", "Bạn không có quyền sử dụng lệnh này (k_ad).", 6) end
+            return
         end
-        return
+    end
+
+    if cmd == "kk_ad" then
+        if senderIsOwner then
+            handleKickAd(note)
+            return
+        else
+            if senderIsLocal then notifyLocal("Không đủ quyền", "Bạn không có quyền sử dụng lệnh này (kk_ad).", 6) end
+            return
+        end
     end
 end
 
